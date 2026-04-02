@@ -1,0 +1,212 @@
+---
+title: "山昆チョウデータベースにおける現状"
+author: "佐野孔亮"
+format:
+  html:
+    embed-resources: true
+    toc: true
+---
+
+```{r setup, include=FALSE}
+# message = FALSEで関数実行時のメッセージ表示を消去
+# warning = FALSEで関数実行時の警告表示をなくす
+# fig.show = "hold"で複数のプロットを横並びに表示
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.show = "hold")
+
+library(conflicted) 
+library(tidyverse)
+library(patchwork) #２種類の図を１つの図にくっつける
+library("remotes")
+library(sf)
+library(jpndistrict)
+library(ggrepel)
+
+grDevices::palette("Okabe-Ito")
+options(
+  ggplot2.continuous.colour = "viridis",
+  ggplot2.continuous.fill = "viridis",
+  ggplot2.discrete.colour = grDevices::palette()[-1],
+  ggplot2.discrete.fill = grDevices::palette()[-1]
+)
+```
+
+# はじめに
+
+山形昆虫同好会では県内の昆虫の採集や分布の記録を電子データ化しようという試みがなされており、先人達の努力により各分類群において長大なデータフレームが構築されている。しかし、それらデータは入力の形式に齟齬があったり、誤入力と思われるデータが存在したり、いくつかの種や地域で漏れや抜けがあったりと、完全なデータベースではない。
+
+今回の報文では、チョウ類のデータに限定し、各種の **「記録上最も早い確認」**、**「記録上最も遅い確認」**、**「記録のある市区町村」**の3項目について整理し報告する。これらはあくまで山昆のデータベース上に現時点で入力されているものであり、絶対的な信頼性が担保されている訳ではないことにご留意願いたい。漏れや抜けの情報をお持ちの方は、ぜひそれらデータを山昆の方へ共有していただけると幸いである。この報告を叩き台として、山昆のデータベースがより正確で利用しやすいものとなることを願う。
+
+# 各種のデータ
+```{r, include=FALSE}
+timei = read.csv("..\\csv_data\\市区町村名データ.csv")|>
+  print()
+
+## 早い記録・遅い記録を表示する関数
+get_record <- function(df, species, type = "earliest") {
+  filtered_df <- df |>
+    dplyr::filter(species_name == species) |>
+    dplyr::distinct(day_of_the_year, 採集者, .keep_all=TRUE)
+  
+  if (type == "earliest") {
+    result <- filtered_df |>
+      dplyr::slice_min(day_of_the_year, n = 10L) |>
+      dplyr::select(PO_date, day_of_the_year, new_city_name, point, All_Adult_Number, 採集者, 引用文献, 備考)
+  } else {
+    result <- filtered_df |>
+      dplyr::slice_max(day_of_the_year, n = 10L) |>
+      dplyr::select(PO_date, day_of_the_year, new_city_name, point, All_Adult_Number, 採集者, 引用文献, 備考)
+  }
+  
+  result |>
+    dplyr::filter(All_Adult_Number != 0) |>
+    dplyr::rename(累計日数 = day_of_the_year, 採集日時 = PO_date, 個体数 = All_Adult_Number, 市町村名 = new_city_name, 詳細地名 = point) |>
+    print()
+}
+
+## 生息地を表示する関数
+plot_city_map <- function(df, species) {
+  yamagata <- jpn_pref(6) |>
+    dplyr::mutate(city = stringr::str_replace_all(city, "^\\w*\\s+", ""))
+  
+  result <- df |>
+    dplyr::filter(species_name == species) |>
+    dplyr::mutate(city_name = stringr::str_replace_all(city_name, "^.*）$", "庄内町")) |>
+    tidyr::drop_na(year, day_of_the_year) |>
+    dplyr::group_by(new_city_name, species_name) |>
+    dplyr::summarize(ave_date = mean(day_of_the_year)) |>
+    dplyr::rename(city = new_city_name)
+  
+  merged_yamagata <- left_join(result, yamagata, by = "city") |>
+    tidyr::drop_na(city_code)
+  
+  merged_yamagata |>
+    mutate(
+      latitude = map_dbl(geometry, ~ st_centroid(.x)[[1]]),
+      longitude = map_dbl(geometry, ~ st_centroid(.x)[[2]])
+    ) |>
+    ggplot() +
+    facet_wrap(vars(species_name)) +
+    geom_sf(aes(geometry = geometry, fill = ave_date, label = city)) +
+    geom_label_repel(aes(x = latitude, y = longitude, label = city), size = 3, min.segment.length = 0)
+}
+
+# 全体を実行する関数
+execute_for_all_species <- function(df) {
+  species_list <- unique(df$species_name)
+  for (species in species_list) {
+    cat("\n", species, "\n")
+    cat("**早い記録**\n")
+    get_record(df, species, "earliest")
+    cat("**遅い記録**\n")
+    get_record(df, species, "latest")
+    cat("**生息している市町村**\n")
+    plot_city_map(df, species)
+  }
+}
+```
+
+
+## アゲハチョウ科
+```{r, include=FALSE}
+
+ageha_nama = read.csv("..\\csv_data\\\\分類別生データ\\山形県市町村別蝶アゲハ生データ.csv")|>
+  print()
+
+kotaisuu_seirizumi = read_csv("..\\csv_data\\整理済_アゲハ全種個体数パターンユニークな行.csv", 
+                              locale = locale(encoding = "Shift-JIS"))|> # または "UTF-8"
+  tidyr::unite(NUM0, num1, num2, num3, num4, remarks, sep = "/") |>
+  print()
+
+df=ageha_nama|>
+  dplyr::mutate(
+    species_name = case_when(
+      row_number() >= 2 & row_number() <= 3990 ~ "ヒメギフチョウ",
+      row_number() >= 3991 & row_number() <= 8285 ~ "ギフチョウ",
+      row_number() >= 8286 & row_number() <= 9418 ~ "ウスバアゲハ",
+      row_number() >= 9419 & row_number() <= 9671 ~ "ジャコウアゲハ",
+      row_number() >= 9672 & row_number() <= 10162 ~ "キアゲハ",
+      row_number() >= 10163 & row_number() <= 10308 ~ "ナミアゲハ",
+      row_number() >= 10309 & row_number() <= 10480 ~ "オナガアゲハ",
+      row_number() >= 10481 & row_number() <= 10515 ~ "モンキアゲハ",
+      row_number() >= 10516 & row_number() <= 10785 ~ "クロアゲハ",
+      row_number() >= 10786 & row_number() <= 11160 ~ "カラスアゲハ",
+      row_number() >= 11161 & row_number() <= 11468 ~ "ミヤマカラスアゲハ",
+      row_number() >= 11469 & row_number() <= 11654 ~ "アオスジアゲハ",
+      row_number() >= 11655 & row_number() <= 11779~ "ホソオチョウ",
+      TRUE ~ NA_character_  # 該当しない行にはNAを入れる
+    )
+  )|>
+  dplyr::mutate(date=採集年月日)|>
+  dplyr::mutate(date = stringr::str_replace_all(date, "\\.", "\\/"))|>
+  dplyr::mutate(PO_date = as.POSIXlt(date, format = "%Y/%m/%d", tz="Japan"))|>
+  dplyr::mutate(day_of_the_year = yday(PO_date))|>
+  dplyr::mutate(year = year(PO_date))|>
+  dplyr::mutate(remarks=備考)|>
+  dplyr::mutate(頭..数 = stringr::str_replace_all(頭..数, "^\\s*$", "NA"))|>
+  dplyr::mutate(頭..数 = na_if(頭..数, "NA"))|>
+  dplyr::mutate(num1=頭..数)|>
+  dplyr::mutate(X = stringr::str_replace_all(X, "^\\s*$", "NA"))|>
+  dplyr::mutate(X = na_if(X, "NA"))|>
+  dplyr::mutate(num2=X)|>
+  dplyr::mutate(X.1 = stringr::str_replace_all(X.1, "^\\s*$", "NA"))|>
+  dplyr::mutate(X.1 = na_if(X.1, "NA"))|>
+  dplyr::mutate(num3=X.1)|>
+  dplyr::mutate(X.2 = stringr::str_replace_all(X.2, "^\\s*$", "NA"))|>
+  dplyr::mutate(X.2 = na_if(X.2, "NA"))|>
+  dplyr::mutate(num4=X.2)|>
+  dplyr::mutate(remarks = stringr::str_replace_all(remarks, "^\\s*$", "NA"))|>
+  dplyr::mutate(remarks = na_if(remarks, "NA"))|>
+  tidyr::unite(NUM0, num1, num2, num3, num4, remarks, sep = "/") |>
+  #tidyr::unite(頭..数, X, X.1, X.2, remarks, sep = "/") |>
+  #dplyr::rename(num1 = 頭..数) |>
+  dplyr::left_join(kotaisuu_seirizumi, by = "NUM0")|>
+  dplyr::rename(city_name = 市町村名) |>
+  dplyr::rename(region = 地域) |>
+  dplyr::rename(point = 採集地) |>
+  dplyr::mutate(point = stringr::str_replace(point, "^.*〃", ""))|>
+  dplyr::mutate(region = na_if(region, ""))|>
+  dplyr::mutate(city_name = na_if(city_name, ""))|>
+  dplyr::mutate(point = na_if(point, ""))|>
+  fill(region, city_name, point)|>
+  tidyr::replace_na(list(Ex_Adult_Number=0, Male_Adult_Number=0, Female_Adult_Number=0))|>
+  dplyr::mutate(All_Adult_Number = Ex_Adult_Number+Male_Adult_Number+ Female_Adult_Number)|>
+  dplyr::left_join(timei, by = "city_name")|>
+  dplyr::rename(new_city_name = 市町村名.合併後.) |>
+  print()
+
+```
+
+### ギフチョウ
+**早い記録**
+```{r, echo=FALSE}
+result = df |>
+  dplyr::filter(species_name == "ギフチョウ") |>
+  dplyr::distinct(day_of_the_year, 採集者, .keep_all=TRUE)|>
+  dplyr::slice_min(day_of_the_year, n = 10L) |>
+  #dplyr::slice_max(day_of_the_year, n = 10L) |>
+  dplyr::select(PO_date, day_of_the_year,  new_city_name,point, All_Adult_Number, 採集者, 引用文献, 備考) |>
+  dplyr::filter(All_Adult_Number != 0) |>
+  dplyr::rename(累計日数 = day_of_the_year) |>
+  dplyr::rename(採集日時 = PO_date) |>
+  dplyr::rename(個体数 = All_Adult_Number) |>
+  dplyr::rename(市町村名 = new_city_name) |>
+  dplyr::rename(詳細地名 = point) |>
+  print()
+```
+
+**遅い記録**
+```{r, echo=FALSE}
+result = df |>
+  dplyr::filter(species_name == "ギフチョウ") |>
+  dplyr::distinct(day_of_the_year, 採集者, .keep_all=TRUE)|>
+  #dplyr::slice_min(day_of_the_year, n = 5L) |>
+  dplyr::slice_max(day_of_the_year, n = 10L) |>
+  dplyr::select(PO_date, day_of_the_year,  new_city_name,point, All_Adult_Number, 採集者, 引用文献, 備考) |>
+  dplyr::filter(All_Adult_Number != 0) |>
+  dplyr::rename(累計日数 = day_of_the_year) |>
+  dplyr::rename(採集日時 = PO_date) |>
+  dplyr::rename(個体数 = All_Adult_Number) |>
+  dplyr::rename(市町村名 = new_city_name) |>
+  dplyr::rename(詳細地名 = point) |>
+  print()
+```
